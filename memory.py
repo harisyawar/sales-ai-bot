@@ -95,7 +95,17 @@ def update_state(user_input: str):
         if not state.get(k):
             state[k] = v
 
+from state import state
 
+def reset_memory():
+    global vector_db
+
+    embeddings = OpenAIEmbeddings()
+
+    vector_db = FAISS.from_texts(
+        ["system_init"],
+        embedding=embeddings
+    )
 # -------------------------
 # STAGE ENGINE (SAFE)
 # -------------------------
