@@ -1,28 +1,51 @@
 from dotenv import load_dotenv
 load_dotenv()
 
+import streamlit as st
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 
-from state import state
 from prompts import SYSTEM_PROMPT
-from memory import save_memory, search_memory, update_state, update_stage, reset_memory
+from memory import save_memory, search_memory, reset_memory
+
+# IMPORTANT: use your new state engine
+from state import (
+    get_state,
+    smart_update_state,
+    reset_state,
+)
 
 llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.3)
 
-chat_history = []
+
+# ==================================================
+# SESSION INIT (STREAMLIT SAFE)
+# ==================================================
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
+if "state" not in st.session_state:
+    st.session_state.state = get_state()
 
 
-# -----------------------------
-# INTENT DETECTION
-# -----------------------------
-def is_user_still_exploring(text: str) -> bool:
+state = st.session_state.state
+chat_history = st.session_state.chat_history
+
+
+# ==================================================
+# UTILS
+# ==================================================
+def is_question(text: str) -> bool:
     text = text.lower()
-    return any(k in text for k in ["how", "what", "why", "can", "which", "?"])
+    return any(x in text for x in ["?", "how", "what", "why", "can", "which"])
 
 
-def should_close_conversation(user_input, state):
+def is_technical(text: str) -> bool:
+    text = text.lower()
+    return any(x in text for x in ["api", "frontend", "backend", "integration", "payment", "stripe"])
 
+
+def should_close(user_input: str) -> bool:
     text = user_input.lower()
 
     exit_phrases = [
@@ -34,47 +57,49 @@ def should_close_conversation(user_input, state):
         "i need to rush"
     ]
 
-    # ❌ NEVER close if user is still asking questions
-    if is_user_still_exploring(text):
+    # NEVER close if still asking questions
+    if is_question(text):
         return False
 
-    # explicit close intent
+    # close intent
     if any(p in text for p in exit_phrases):
         return True
 
-    # implicit close only if EVERYTHING is filled
+    # close if fully qualified
     required = ["business", "goal", "budget", "timeline", "email"]
     return all(state.get(k) for k in required)
 
 
-# -----------------------------
-# MAIN BOT
-# -----------------------------
-def sales_bot(user_input):
+# ==================================================
+# MAIN SALES BOT (PRODUCTION FLOW)
+# ==================================================
+def sales_bot(user_input: str):
 
     chat_history.append(f"User: {user_input}")
 
-    update_state(user_input)
-    update_stage()
+    # -------------------------
+    # 1. UPDATE CRM STATE (IMPORTANT FIX)
+    # -------------------------
+    smart_update_state(state, user_input)
 
     text = user_input.lower()
 
     # ==================================================
-    # 1. HANDLE TECH QUESTIONS FIRST (IMPORTANT FIX)
+    # 2. TECHNICAL MODE (EXPERT ANSWERING MODE)
     # ==================================================
-    if any(k in text for k in ["api", "frontend", "backend", "integration", "ticket"]):
-        history_text = "\n".join(chat_history[-6:])
+    if is_technical(text):
 
         context = f"""
-STAGE: {state.get('stage')}
+You are a senior software + sales architect.
 
 CHAT:
-{history_text}
+{chat_history[-6:]}
 
 STATE:
 {state}
 
-User: {user_input}
+User:
+{user_input}
 """
 
         response = llm.invoke([
@@ -88,26 +113,50 @@ User: {user_input}
         return response.content
 
     # ==================================================
-    # 2. CLOSING FLOW (ONLY WHEN SAFE)
+    # 3. MEMORY + CONTEXT BUILD
     # ==================================================
-    if should_close_conversation(user_input, state):
+    context = f"""
+You are a high-level AI sales consultant.
 
-        # prevent duplicate closing
+Your job:
+- ask natural consulting questions (NOT form questions)
+- understand business deeply
+- guide toward proposal
+- never repeat already collected data
+
+STATE:
+{state}
+
+CHAT HISTORY:
+{chat_history[-6:]}
+
+LONG TERM MEMORY:
+{search_memory(user_input)}
+
+User:
+{user_input}
+"""
+
+    # ==================================================
+    # 4. CLOSE FLOW (HIGH PRIORITY)
+    # ==================================================
+    if should_close(user_input):
+
         if state.get("completed"):
             return "We are already preparing your proposal 👍"
 
-        # EMAIL REQUIRED GATE
         if not state.get("email"):
-            return "Perfect — before I prepare your proposal, may I have your email?"
+            return "Perfect — before I prepare your proposal, what’s your email so I can send it?"
 
-        # FINAL CLOSE
+        # FINAL CLOSE RESPONSE
         state["completed"] = True
 
         reply = f"""
-Perfect — I’ve got everything I need.
+✅ Perfect — I’ve got everything needed.
 
 📌 Project Summary:
 - Business: {state.get('business')}
+- Industry: {state.get('industry')}
 - Goal: {state.get('goal')}
 - Budget: {state.get('budget')}
 - Timeline: {state.get('timeline')}
@@ -115,39 +164,25 @@ Perfect — I’ve got everything I need.
 📩 Proposal will be sent to:
 {state.get('email')}
 
-We’ll prepare your full website proposal and send it shortly.
+We’ll now prepare your professional proposal and send it shortly 🚀
 
 Thanks — speak soon 👋
 """
 
         save_memory(reply)
 
-        # RESET SYSTEM FOR NEXT LEAD
-        reset_memory()
+        # ==================================================
+        # RESET EVERYTHING (CRITICAL FIX FOR YOUR BUG)
+        # ==================================================
         chat_history.clear()
+        reset_memory()
+        reset_state(state)
 
         return reply
 
     # ==================================================
-    # 3. NORMAL CONVERSATION FLOW
+    # 5. NORMAL AI RESPONSE (SALES CONSULTANT MODE)
     # ==================================================
-    history_text = "\n".join(chat_history[-6:])
-
-    context = f"""
-STAGE: {state.get('stage')}
-
-CHAT HISTORY:
-{history_text}
-
-MEMORY:
-{search_memory(user_input)}
-
-STATE:
-{state}
-
-User: {user_input}
-"""
-
     response = llm.invoke([
         SystemMessage(content=SYSTEM_PROMPT),
         HumanMessage(content=context)
@@ -157,7 +192,3 @@ User: {user_input}
     save_memory(response.content)
 
     return response.content
-
-
-# optional
-REQUIRED_FIELDS = ["business", "goal", "budget", "timeline", "email"]

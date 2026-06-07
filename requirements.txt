@@ -5,4 +5,4 @@ langchain-community
 faiss-cpu
 openai
 python-dotenv
-tiktoken	
+tiktoken

@@ -1,13 +1,17 @@
+import json
+from datetime import datetime
+
 from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
-import json
 
-from state import state
+# IMPORTANT: no direct state import (prevents circular bugs)
+from state import get_state
 
-# -------------------------
-# EMBEDDINGS + VECTOR DB
-# -------------------------
+
+# ==================================================
+# EMBEDDINGS ENGINE
+# ==================================================
 embeddings = OpenAIEmbeddings()
 
 vector_db = FAISS.from_texts(
@@ -16,51 +20,63 @@ vector_db = FAISS.from_texts(
 )
 
 
+# ==================================================
+# MEMORY STORAGE (LONG TERM VECTOR MEMORY)
+# ==================================================
 def save_memory(text: str):
-    """Store conversation in vector DB"""
-    vector_db.add_texts([text])
+    """Store meaningful conversation chunks"""
+    try:
+        if text and len(text.strip()) > 3:
+            vector_db.add_texts([text])
+    except Exception as e:
+        print("Memory save error:", e)
 
 
+# ==================================================
+# MEMORY SEARCH (CONTEXT RETRIEVAL)
+# ==================================================
 def search_memory(query: str):
-    """Retrieve relevant memory"""
+    """Retrieve relevant past context"""
     try:
         docs = vector_db.similarity_search(query, k=3)
         return "\n\n".join([d.page_content for d in docs]) if docs else ""
     except Exception as e:
-        print("Memory error:", e)
+        print("Memory search error:", e)
         return ""
 
 
-# -------------------------
-# EXTRACTION LLM
-# -------------------------
+# ==================================================
+# EXTRACTION ENGINE (CRM DATA PARSER)
+# ==================================================
 llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 
-
 EXTRACTION_PROMPT = """
-Extract structured JSON ONLY:
+You are a CRM data extraction system.
+
+Extract ONLY valid JSON:
 
 {
   "business": null,
+  "industry": null,
   "goal": null,
-  "platform": null,
   "budget": null,
   "timeline": null,
   "email": null,
-  "phone": null
+  "phone": null,
+  "platform": null
 }
 
 RULES:
-- Extract only if clearly mentioned
-- If not present, return null
+- Extract only explicitly mentioned values
+- Do NOT guess
+- If missing, return null
 - Email must be exact if present
+- Keep response STRICT JSON ONLY (no explanation)
 """
 
 
-# -------------------------
-# SAFE JSON PARSER
-# -------------------------
 def extract_data(user_input: str):
+    """Convert user message into structured CRM data"""
 
     try:
         response = llm.invoke([
@@ -75,48 +91,92 @@ def extract_data(user_input: str):
         return {}
 
 
-# -------------------------
-# STATE UPDATER
-# -------------------------
-def update_state(user_input: str):
+# ==================================================
+# SMART STATE UPDATER (CRM SAFE)
+# ==================================================
+def update_state(state: dict, user_input: str):
 
     data = extract_data(user_input)
 
-    for k, v in data.items():
+    for key, value in data.items():
 
-        if not v:
+        if not value:
             continue
 
-        # normalize empty strings
-        if isinstance(v, str) and v.strip() == "":
+        if isinstance(value, str) and not value.strip():
             continue
 
-        # only update if not already set
-        if not state.get(k):
-            state[k] = v
+        # only set once (prevents overwrite)
+        if not state.get(key):
+            state[key] = value
 
-from state import state
 
-def reset_memory():
-    global vector_db
-
-    embeddings = OpenAIEmbeddings()
-
-    vector_db = FAISS.from_texts(
-        ["system_init"],
-        embedding=embeddings
-    )
-# -------------------------
-# STAGE ENGINE (SAFE)
-# -------------------------
-def update_stage():
+# ==================================================
+# STAGE ENGINE (CRM PIPELINE LOGIC)
+# ==================================================
+def update_stage(state: dict):
 
     try:
-        if state.get("business") and state.get("goal") and state.get("budget"):
-            state["stage"] = "consultation"
+        filled = sum([
+            1 if state.get("business") else 0,
+            1 if state.get("goal") else 0,
+            1 if state.get("budget") else 0,
+            1 if state.get("timeline") else 0,
+            1 if state.get("email") else 0,
+        ])
 
-        if state.get("email") and state.get("phone"):
+        # -------------------------
+        # STAGE LOGIC
+        # -------------------------
+        if filled <= 2:
+            state["stage"] = "discovery"
+
+        elif filled <= 4:
+            state["stage"] = "qualification"
+
+        else:
+            state["stage"] = "proposal_ready"
+
+        # closing condition
+        if state.get("email") and state.get("budget"):
             state["stage"] = "closing"
 
     except Exception as e:
-        print("Stage error:", e)
+        print("Stage update error:", e)
+
+
+# ==================================================
+# RESET MEMORY (CRITICAL FIX FOR STREAMLIT BUGS)
+# ==================================================
+def reset_memory():
+    """
+    Completely resets vector memory (FAISS)
+    Safe for Streamlit session resets
+    """
+
+    global vector_db
+
+    try:
+        vector_db = FAISS.from_texts(
+            ["system_init"],
+            embedding=embeddings
+        )
+    except Exception as e:
+        print("Memory reset error:", e)
+
+
+# ==================================================
+# FULL CRM RESET (OPTIONAL ADVANCED USE)
+# ==================================================
+def reset_full_system(state: dict):
+    """
+    Resets both CRM state + memory
+    """
+
+    try:
+        state.clear()
+        state.update(get_state())
+        reset_memory()
+
+    except Exception as e:
+        print("Full reset error:", e)
