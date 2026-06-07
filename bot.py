@@ -6,100 +6,150 @@ from langchain_core.messages import SystemMessage, HumanMessage
 
 from state import state
 from prompts import SYSTEM_PROMPT
-from memory import save_memory, search_memory, update_state, update_stage
 
+from memory import (
+    save_memory,
+    update_state,
+    update_stage
+)
 
-llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.3)
+llm = ChatOpenAI(
+    model="gpt-4o-mini",
+    temperature=0.3
+)
 
 chat_history = []
 
+
+# --------------------------------
+# CLOSE DETECTION
+# --------------------------------
+
 def should_close_conversation(user_input, state):
+
+    text = user_input.lower()
+
     exit_phrases = [
         "i need to rush",
         "send proposal",
         "email me",
-        "we can do it on email",
+        "send it over",
         "close this",
         "i'm busy",
-        "send it over"
+        "we can do it on email",
+        "send the proposal",
+        "can you send proposal"
     ]
 
-    text = user_input.lower()
-
+    # User explicitly wants to leave
     if any(p in text for p in exit_phrases):
-        return True
 
-    required = ["business", "goal", "budget"]
-    filled = sum(1 for k in required if state.get(k))
+        # Don't close until email exists
+        return bool(state.get("email"))
 
-    if filled >= 3:
-        return True
+    # Auto-close only when all important fields exist
+    required = [
+        "business",
+        "goal",
+        "budget",
+        "email"
+    ]
 
-    return False
+    return all(state.get(field) for field in required)
+
+
+# --------------------------------
+# MAIN SALES BOT
+# --------------------------------
 
 def sales_bot(user_input):
-    if should_close_conversation(user_input, state):
 
-        state["completed"] = True
+    # Consultation already completed
+    if state.get("completed"):
 
-        email = state.get("email") or "not provided"
+        text = user_input.lower().strip()
 
-        reply = f"""
-Perfect — I’ve got everything I need.
+        if text in ["thanks", "thank you", "bye", "ok", "okay"]:
+            return "You're welcome. Have a great day 👋"
 
-📌 Project Summary:
-- Business: {state.get('business')}
-- Goal: {state.get('goal')}
-- Budget: {state.get('budget')}
+        return (
+            "This consultation has already been completed.\n"
+            "Type /reset to start a new project."
+        )
 
-📩 Proposal will be sent to:
-{email}
-
-We’ll prepare your full website proposal and send it shortly.
-
-Thanks — speak soon 👋
-"""
-
-        save_memory(reply)
-        return reply
     chat_history.append(f"User: {user_input}")
 
     update_state(user_input)
     update_stage()
 
-    if state.get("stage") == "closing" and not state.get("completed"):
+    # -----------------------------
+    # EMAIL MISSING BUT USER WANTS PROPOSAL
+    # -----------------------------
+
+    proposal_keywords = [
+        "proposal",
+        "email",
+        "send",
+        "rush",
+        "close"
+    ]
+
+    if any(k in user_input.lower() for k in proposal_keywords):
+
+        if not state.get("email"):
+
+            return (
+                "Perfect — I have most of the information I need 👍\n\n"
+                "Before I prepare the proposal, please share your email address."
+            )
+
+    # -----------------------------
+    # FINAL CLOSING
+    # -----------------------------
+
+    if should_close_conversation(user_input, state):
 
         state["completed"] = True
 
         reply = f"""
-Perfect — I’ve got everything I need.
+Perfect — I've got everything I need.
 
-We will prepare your website proposal and send it to:
+📌 Project Summary
+
+Business: {state.get('business')}
+Goal: {state.get('goal')}
+Budget: {state.get('budget')}
+
+📩 Proposal will be sent to:
 {state.get('email')}
 
-Our team will contact you shortly.
+We’ll prepare your website proposal and send it shortly.
 
-Thank you 👋
+Thanks — speak soon 👋
 """
 
         save_memory(reply)
+
         return reply
 
-    history_text = "\n".join(chat_history[-6:])
+    # -----------------------------
+    # NORMAL CONSULTATION
+    # -----------------------------
+
+    history_text = "\n".join(chat_history[-10:])
 
     context = f"""
-STAGE: {state.get('stage')}
+CURRENT STAGE:
+{state.get('stage')}
 
-CHAT:
+CHAT HISTORY:
 {history_text}
 
-MEMORY:
-{search_memory(user_input)}
-
-STATE:
+CURRENT STATE:
 {state}
 
-User: {user_input}
+User:
+{user_input}
 """
 
     response = llm.invoke([
@@ -107,16 +157,11 @@ User: {user_input}
         HumanMessage(content=context)
     ])
 
-    chat_history.append(f"AI: {response.content}")
+    answer = response.content
 
-    save_memory(response.content)
+    chat_history.append(f"AI: {answer}")
 
-    return response.content
+    save_memory(f"User: {user_input}")
+    save_memory(f"AI: {answer}")
 
-REQUIRED_FIELDS = [
-    "business",
-    "goal",
-    "budget",
-    "timeline",
-    "email"
-]
+    return answer

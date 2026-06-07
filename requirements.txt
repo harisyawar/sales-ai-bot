@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 streamlit
 langchain
 langchain-openai
@@ -6,3 +7,13 @@ faiss-cpu
 openai
 python-dotenv
 tiktoken
+=======
+streamlit
+langchain
+langchain-openai
+langchain-community
+faiss-cpu
+openai
+python-dotenv
+tiktoken
+>>>>>>> 586ee99 (clean deployment setup)
